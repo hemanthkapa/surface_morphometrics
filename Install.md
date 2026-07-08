@@ -2,7 +2,7 @@
 Installing the morphometrics pipeline is usually relatively easy, but there are a few edge cases that require special attention.
 
 ## M1 Macs
-**Thanks to Genevieve Buckley for this solution: (https://github.com/GrotjahnLab/surface_morphometrics/issues/8)**
+**Thanks to Genevieve Buckley for this solution: (https://github.com/baradlab/surface_morphometrics/issues/8)**
 This is a temporary workaround and needs additional testing!
 
 0. Build the conda environment like normal, but don't pip install pymeshlab - just remove it from the pip_requirements.txt file
@@ -63,4 +63,4 @@ pip install -e .
 Verify with `morphometrics --help`, then try the pipeline on the example data (start with `morphometrics new_config` to write a `config.yml`). See the README for more details.
 
 ## Container Implementation
-For older linux environments (such as CentOS7) Qt5 will not behave well. A container implementation is in progress (https://github.com/GrotjahnLab/surface_morphometrics/issues/10)
+For older linux environments (such as CentOS7) Qt5 will not behave well. A container implementation is in progress (https://github.com/baradlab/surface_morphometrics/issues/10)

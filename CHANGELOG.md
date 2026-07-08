@@ -97,5 +97,5 @@ how the toolkit is invoked.
 - README reorganized (Installation / Quick start / Pipeline / Analysis &
   visualization / Reference / Upgrading) with a table of contents.
 
-[2.0.0b2]: https://github.com/GrotjahnLab/surface_morphometrics/releases
-[2.0.0b1]: https://github.com/GrotjahnLab/surface_morphometrics/releases
+[2.0.0b2]: https://github.com/baradlab/surface_morphometrics/releases
+[2.0.0b1]: https://github.com/baradlab/surface_morphometrics/releases

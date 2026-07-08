@@ -43,9 +43,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/GrotjahnLab/surface_morphometrics"
-Repository = "https://github.com/GrotjahnLab/surface_morphometrics"
-Issues = "https://github.com/GrotjahnLab/surface_morphometrics/issues"
+Homepage = "https://github.com/baradlab/surface_morphometrics"
+Repository = "https://github.com/baradlab/surface_morphometrics"
+Issues = "https://github.com/baradlab/surface_morphometrics/issues"
 
 [project.optional-dependencies]
 test = ["pytest"]

@@ -1,6 +1,6 @@
 """Surface Morphometrics: quantification of membrane surfaces from cryo-ET.
 
-See https://github.com/GrotjahnLab/surface_morphometrics and the `morphometrics`
+See https://github.com/baradlab/surface_morphometrics and the `morphometrics`
 command line interface (defined in `surface_morphometrics.cli`).
 """
 

@@ -1,5 +1,5 @@
 # Surface Morphometrics Pipeline
-![Workflow Figure](https://raw.githubusercontent.com/GrotjahnLab/surface_morphometrics/master/Workflow_title.png)
+![Workflow Figure](https://raw.githubusercontent.com/baradlab/surface_morphometrics/master/Workflow_title.png)
 ### Quantification of Membrane Surfaces Segmented from Cryo-ET or other volumetric imaging.
 Author: __Benjamin Barad__/*<benjamin.barad@gmail.com>*, developed in close collaboration with Michaela Medina.
 
@@ -29,7 +29,7 @@ Everything is driven by a single `morphometrics` command plus a `config.yml` fil
 
 ### Option 1: Conda (recommended)
 The fastest, easiest starting point for most Linux boxes, and now for Mac as well.
-1. Clone the repository: `git clone https://github.com/grotjahnlab/surface_morphometrics.git`
+1. Clone the repository: `git clone https://github.com/baradlab/surface_morphometrics.git`
 2. Create the environment (this also installs the toolkit and the `morphometrics` command via `pip install -e .`): `conda env create -f environment.yml`
 3. Activate it: `conda activate morphometrics`
 4. Check the install: `morphometrics --help` should list the pipeline subcommands.
@@ -41,7 +41,7 @@ The fastest, easiest starting point for most Linux boxes, and now for Mac as wel
 ### Option 2: Docker
 Useful on Windows and other systems where graph-tool or pymeshlab do not play nicely with conda. The image ships with all dependencies pre-installed.
 ```bash
-git clone https://github.com/grotjahnlab/surface_morphometrics.git
+git clone https://github.com/baradlab/surface_morphometrics.git
 cd surface_morphometrics/docker
 ./sm-up.sh      # build/pull, start, and enter the container
 # ... run morphometrics commands inside the container ...
