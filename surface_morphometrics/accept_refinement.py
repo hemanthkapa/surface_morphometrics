@@ -115,9 +115,9 @@ def accept_one(work_dir, basename, step, radius_hit, dry_run):
     print(f"Accepting iteration {step} for: {basename}")
 
     # refine_mesh.py only runs full pycurv (producing an AVV curvature graph) on
-    # the final iteration; intermediate xcorr iterations get a lightweight graph
-    # instead.  If the chosen iteration has no AVV graph, the promoted surface is
-    # not ready for downstream analysis until pycurv is re-run.
+    # the final surface; every intermediate iteration (xcorr or Gaussian) gets a
+    # lightweight graph instead.  If the chosen iteration has no AVV graph, the
+    # promoted surface is not ready for downstream analysis until pycurv is re-run.
     has_avv = os.path.exists(f"{work_dir}{iter_prefix}.AVV_rh{radius_hit}.gt")
 
     # 1. Back up the canonical original surfaces to *.orig.bak so the promotion
@@ -175,7 +175,7 @@ def accept_one(work_dir, basename, step, radius_hit, dry_run):
 
     # 5. Warn if the promoted surface still needs a curvature graph.
     if not has_avv:
-        print(f"  WARNING: iteration {step} was a lightweight (xcorr) iteration with no "
+        print(f"  WARNING: iteration {step} was an intermediate iteration with no "
               f"curvature graph.")
         print(f"           The promoted surface has no .AVV_rh{radius_hit}.gt and is NOT "
               f"ready for")
@@ -208,9 +208,9 @@ def accept_refinement_cli(configfile, step, component_name, tomogram, dry_run):
     refinement summaries (_refinement_stats.csv, _refinement_convergence.png,
     _profile_evolution.png) are kept.
 
-    If the chosen iteration is a lightweight (xcorr) iteration with no curvature
-    graph, the command warns that pycurv must be re-run on the promoted surface
-    before any downstream analysis.
+    If the chosen iteration is a lightweight intermediate iteration with no
+    curvature graph, the command warns that pycurv must be re-run on the promoted
+    surface before any downstream analysis.
     """
     config = load_config(configfile, require=("work_dir",))
 
@@ -270,7 +270,7 @@ def accept_refinement_cli(configfile, step, component_name, tomogram, dry_run):
               "and refinement summaries were kept.")
     if needs_pycurv:
         print()
-        print("ACTION REQUIRED: the following surface(s) came from a lightweight (xcorr)")
+        print("ACTION REQUIRED: the following surface(s) came from an intermediate")
         print("iteration and have no curvature graph. Re-run pycurv before any downstream")
         print("step (distances, density sampling, thickness):")
         for basename in needs_pycurv:

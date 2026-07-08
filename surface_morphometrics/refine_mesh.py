@@ -133,7 +133,8 @@ def build_triangle_to_vertex_mapping(surf):
 
 
 def compute_triangle_offsets(graph, sampling_data, x_positions, average_radius, monolayer=False,
-                              use_xcorr=False, fallback_offset=None, global_fit_params=None):
+                              use_xcorr=False, fallback_offset=None, global_fit_params=None,
+                              n_workers=None):
     """
     Compute the offset from membrane center for each triangle.
 
@@ -163,6 +164,10 @@ def compute_triangle_offsets(graph, sampling_data, x_positions, average_radius, 
         (method=3) or failed entirely (method=0) will use this value instead
         of the per-triangle median. Intended for passing the global average
         midpoint so that poor-fit triangles get a reliable centering correction.
+    n_workers : int or None
+        Number of worker processes for the parallel Gaussian fitting. If None,
+        falls back to the machine's logical CPU count (multiprocessing.cpu_count()).
+        Pass the pipeline `cores` setting to respect the configured core budget.
 
     Returns
     -------
@@ -241,7 +246,9 @@ def compute_triangle_offsets(graph, sampling_data, x_positions, average_radius, 
         # Use spawn context explicitly to avoid conflicts with pycurv's multiprocessing
         print(f"  Fitting gaussians using multiprocessing...")
         ctx = mp.get_context('spawn')
-        n_workers = ctx.cpu_count()
+        if n_workers is None:
+            n_workers = ctx.cpu_count()
+        print(f"  Using {n_workers} worker processes")
 
         # Create chunks of indices for each worker
         chunk_size = max(100, num_triangles // (n_workers * 4))
@@ -742,13 +749,79 @@ def build_lightweight_graph(surf, output_gt_path):
     return output_gt_path
 
 
+def finalize_surface_with_pycurv(surface_vtp, mrc_file, output_base, pixel_size,
+                                 radius_hit, sample_spacing, scan_range, angstroms,
+                                 cores, average_radius, compute_thickness=True):
+    """Run full pycurv on an already-refined surface to produce the final output.
+
+    Intermediate refinement iterations skip pycurv (they build fast lightweight
+    VTK-normal graphs that are not curvature-ready).  This runs the single, full
+    pycurv normal-vector-voting pass on the final accepted surface so the user
+    gets a clean, curvature-ready graph/surface to move forward with.  It does
+    NOT move any vertices — the geometry is already final; it only computes
+    curvature (and, optionally, the local-thickness distribution).
+
+    Intended to be called exactly once, after the refinement loop, on every exit
+    path (all iterations completed OR an early convergence stop).
+
+    Parameters
+    ----------
+    surface_vtp : str
+        Path to the final refined surface (.surface.vtp) to run pycurv on.
+    mrc_file : str
+        Tomogram, used only if compute_thickness is True.
+    output_base : str
+        Base path for the pycurv outputs (matches the final iteration).
+    compute_thickness : bool
+        If True, also measure the local thickness distribution on the finalized
+        surface (for the convergence histogram).
+
+    Returns
+    -------
+    dict
+        'graph_file', 'surface_file', and thickness stats
+        ('local_thicknesses', 'mean_thickness', 'std_thickness').
+    """
+    print("\n=== Finalizing accepted surface with pycurv ===")
+    print("Running full pycurv normal vector voting for a curvature-ready final surface...")
+    graph_file, surface_file = run_pycurv_refinement(
+        surface_vtp, output_base, pixel_size, radius_hit, cores)
+
+    result = {
+        'graph_file': graph_file,
+        'surface_file': surface_file,
+        'local_thicknesses': np.array([]),
+        'mean_thickness': np.nan,
+        'std_thickness': np.nan,
+    }
+
+    if compute_thickness:
+        print("Computing local thickness distribution on the finalized surface...")
+        refined_value_array, refined_x_positions, _ = sample_density_single(
+            mrc_file, graph_file,
+            sample_spacing=sample_spacing, scan_range=scan_range, angstroms=angstroms)
+        rtg = TriangleGraph()
+        rtg.graph = load_graph(graph_file)
+        refined_xyz = rtg.graph.vp.xyz.get_2d_array([0, 1, 2]).transpose()
+        local_thicknesses = compute_local_thicknesses_parallel(
+            refined_value_array, refined_xyz, refined_x_positions, average_radius,
+            n_workers=cores)
+        valid = local_thicknesses[~np.isnan(local_thicknesses)]
+        print(f"  Valid thickness measurements: {len(valid)}/{len(local_thicknesses)}")
+        result['local_thicknesses'] = valid
+        result['mean_thickness'] = np.mean(valid) if len(valid) > 0 else np.nan
+        result['std_thickness'] = np.std(valid) if len(valid) > 0 else np.nan
+
+    return result
+
+
 def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_size,
                           radius_hit, average_radius, damping_factor, sample_spacing,
                           scan_range, angstroms, cores, monolayer=False,
                           original_positions=None, max_total_offset=None, use_xcorr=False,
                           smooth_offsets=True, offset_smoothing_radius=None,
                           laplacian_iterations=0, laplacian_lambda=0.5, lowpass_sigma=0,
-                          compute_thickness=False):
+                          run_full_pycurv=True, compute_thickness=False):
     """
     Perform a single iteration of mesh refinement.
 
@@ -796,6 +869,12 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
         Laplacian smoothing strength (0-1)
     lowpass_sigma : float
         Sigma in nm for 3D Gaussian low-pass filter on tomogram before sampling (0 = disabled)
+    run_full_pycurv : bool
+        If True, run full pycurv normal-vector voting to produce a curvature-ready
+        graph/surface. If False (used for every intermediate iteration), build a
+        fast lightweight VTK-normal graph instead and warn that the surface is not
+        curvature-ready. The single full pycurv pass is run once on the final
+        accepted surface by finalize_surface_with_pycurv() after the loop.
     compute_thickness : bool
         If True, compute local thickness distribution for all triangles (slow ~2 min).
         Only needed on the final iteration for the convergence histogram.
@@ -889,7 +968,7 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
     offsets, sigmas1, sigmas2 = compute_triangle_offsets(
         tg.graph, sampling_data, x_positions, average_radius, monolayer=monolayer,
         use_xcorr=use_xcorr, fallback_offset=gaussian_fallback,
-        global_fit_params=global_fit_params
+        global_fit_params=global_fit_params, n_workers=cores
     )
 
     # Get normal vectors and coordinates from graph
@@ -926,27 +1005,29 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
     io.save_vtp(refined_surf, refined_vtp)
     print(f"Saved refined surface: {refined_vtp}")
 
-    # For xcorr iterations (except the final one), skip pycurv NVV (~28 min) and
-    # build a lightweight graph from VTK normals instead (~seconds).  XCorr applies
-    # small local displacements so VTK normals are good enough for the next
-    # iteration's sampling and KDTree.  The final iteration always runs full pycurv
-    # so the output graph has proper NVV normals for downstream curvature analysis.
-    if use_xcorr and not compute_thickness:
-        print("Building lightweight graph from VTK normals (skipping pycurv NVV)...")
-        new_graph_file = build_lightweight_graph(refined_surf, f"{output_base}.lightweight.gt")
-        new_surface_file = refined_vtp
-        print(f"  Lightweight graph: {new_graph_file}")
-    else:
+    # Full pycurv normal-vector voting is the slow step (~28 min on large surfaces),
+    # so it is skipped on every intermediate iteration: we build a fast lightweight
+    # graph from VTK normals instead (good enough for the next iteration's density
+    # sampling and KDTree).  Full pycurv runs ONCE, on the final accepted surface,
+    # via finalize_surface_with_pycurv() after the refinement loop — including when
+    # the loop stops early on convergence.  Intermediate surfaces are therefore NOT
+    # curvature-ready.
+    if run_full_pycurv:
         print("Running pycurv normal vector voting...")
         new_graph_file, new_surface_file = run_pycurv_refinement(
             refined_vtp, output_base, pixel_size, radius_hit, cores
         )
-
-    # Save density sampling CSV (pre-refinement sampling used for fitting)
-    if use_xcorr:
-        sampling_csv = f"{output_base}.lightweight_sampling.csv"
-    else:
         sampling_csv = f"{output_base}.AVV_rh{radius_hit}_sampling.csv"
+    else:
+        print("Building lightweight graph from VTK normals (skipping pycurv NVV)...")
+        print("  WARNING: intermediate surface — pycurv was NOT run, so this surface has")
+        print("           no curvature data and is not ready for downstream analysis.")
+        print("           A full pycurv pass runs automatically on the final surface;")
+        print("           to use THIS mid-stage surface, run `morphometrics pycurv` on it.")
+        new_graph_file = build_lightweight_graph(refined_surf, f"{output_base}.lightweight.gt")
+        new_surface_file = refined_vtp
+        print(f"  Lightweight graph: {new_graph_file}")
+        sampling_csv = f"{output_base}.lightweight_sampling.csv"
     header = ",".join([f"{p:.4f}" for p in x_positions])
     np.savetxt(sampling_csv, sampling_data.values, delimiter=",", header=header, comments="")
     print(f"Saved sampling data: {sampling_csv}")
@@ -1027,7 +1108,8 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
     # Only run on the final iteration (compute_thickness=True) — it adds ~2 min per surface.
     if compute_thickness:
         local_thicknesses = compute_local_thicknesses_parallel(
-            refined_value_array, refined_xyz, refined_x_positions, average_radius
+            refined_value_array, refined_xyz, refined_x_positions, average_radius,
+            n_workers=cores
         )
         valid_thicknesses = local_thicknesses[~np.isnan(local_thicknesses)]
         print(f"  Valid thickness measurements: {len(valid_thicknesses)}/{len(local_thicknesses)}")
@@ -1241,21 +1323,19 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
 
     print(f"Found {len(mrc_files)} tomogram(s) to process")
 
-    # Mesh refinement improves every surface, but it is by far the slowest step in
-    # the pipeline: it re-runs pycurv internally on each Gaussian-fitting iteration
-    # (the cross-correlation iterations skip the slow normal-vector voting, and the
-    # final iteration always runs full pycurv).
-    full_pycurv_iters = sorted(i for i in all_iters if i not in xcorr_iterations or i == iterations)
-    n_full = len(full_pycurv_iters)
+    # Mesh refinement improves every surface and is the slowest pipeline step, but
+    # it now runs pycurv's normal-vector voting only ONCE per surface — on the final
+    # accepted surface, after all iterations complete (or after an early convergence
+    # stop).  Intermediate iterations build fast lightweight VTK-normal graphs and
+    # are NOT curvature-ready.
     print("")
     print("=" * 70)
-    print("NOTE: Mesh refinement is the slowest step in the pipeline. It improves")
-    print(f"      every surface, but it runs pycurv internally on {n_full} of "
-          f"{iterations} iterations")
-    print(f"      (iters {full_pycurv_iters}), so budget very roughly {n_full}x the time of one")
-    print(f"      `morphometrics pycurv` run per surface, x{len(mrc_files)} tomogram(s).")
-    print("      For large datasets, run one surface at a time (--tomogram / --mrc)")
-    print("      in parallel on a cluster, or set aside time for the full run.")
+    print("NOTE: Mesh refinement is the slowest pipeline step, but it runs pycurv")
+    print("      only ONCE per surface — on the final accepted surface (after all")
+    print("      iterations, or after an early convergence stop). Intermediate")
+    print("      per-iteration surfaces skip pycurv and are NOT curvature-ready;")
+    print("      run `morphometrics pycurv` on one only if you want curvature for")
+    print(f"      that specific mid-stage surface. x{len(mrc_files)} tomogram(s).")
     print("=" * 70)
 
     for mrc_file in mrc_files:
@@ -1432,8 +1512,9 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
 
                     iter_use_xcorr = iter_num in xcorr_iterations
 
-                    # Skip remaining xcorr iterations if xcorr phase already converged.
-                    # Gaussian iterations are never skipped this way — they must run for pycurv output.
+                    # Skip remaining xcorr iterations if the xcorr phase already
+                    # converged. Gaussian iterations are never skipped this way —
+                    # they still perform the actual density-guided refinement.
                     if xcorr_phase_converged and iter_use_xcorr:
                         continue
 
@@ -1461,7 +1542,8 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
                         laplacian_iterations=laplacian_iterations,
                         laplacian_lambda=laplacian_lambda,
                         lowpass_sigma=lowpass_sigma,
-                        compute_thickness=(iter_num == iterations)
+                        run_full_pycurv=False,
+                        compute_thickness=False
                     )
 
                     stats['iteration'] = iter_num
@@ -1549,8 +1631,10 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
 
                     # Early stopping check.
                     # XCorr phase: if converged, skip remaining xcorr iters but continue
-                    # to Gaussian phase (which must run for pycurv curvature output).
-                    # Gaussian phase: if converged, stop entirely (pycurv already ran).
+                    # to the Gaussian phase (which performs the actual refinement).
+                    # Gaussian phase: if converged, stop the loop entirely. The final
+                    # full-pycurv pass runs after the loop regardless of how it exits,
+                    # so an early stop still yields a clean, curvature-ready surface.
                     mean_offset = stats.get('mean_offset', np.nan)
                     if (convergence_threshold is not None
                             and not np.isnan(mean_offset)
@@ -1562,8 +1646,32 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
                             xcorr_phase_converged = True
                         elif not iter_use_xcorr:
                             print(f"  Converged (|offset|={mean_offset:.3f} nm < {convergence_threshold:.3f} nm). "
-                                  f"Stopping early after iteration {iter_num}.")
+                                  f"Stopping early after iteration {iter_num}; "
+                                  f"running final pycurv on this surface.")
                             break
+
+                # Finalize the accepted surface: run full pycurv ONCE so the user
+                # gets a clean, curvature-ready final surface. Intermediate iterations
+                # skip pycurv (lightweight VTK-normal graphs only), so this single
+                # pass is what makes the output usable — and it runs on every exit
+                # path here, including the early convergence stop above.
+                if len(iteration_stats) > 1:
+                    fin = finalize_surface_with_pycurv(
+                        current_vtp, mrc_file, iter_output_base, pixel_size,
+                        radius_hit, sample_spacing, scan_range, angstroms, cores,
+                        current_avg_radius, compute_thickness=True)
+                    final_entry = iteration_stats[-1]
+                    final_entry['graph_file'] = fin['graph_file']
+                    final_entry['surface_file'] = fin['surface_file']
+                    final_entry['local_thicknesses'] = fin['local_thicknesses']
+                    final_entry['mean_thickness'] = fin['mean_thickness']
+                    final_entry['std_thickness'] = fin['std_thickness']
+                    current_graph = fin['graph_file']
+                    current_vtp = fin['surface_file']
+                    print(f"Final curvature-ready surface: {fin['surface_file']}")
+                    if not np.isnan(fin['mean_thickness']):
+                        print(f"  Final mean thickness: {fin['mean_thickness']:.3f} "
+                              f"+/- {fin['std_thickness']:.3f} nm")
 
                 # Save iteration statistics (full, including iteration 0)
                 stats_df_full = pd.DataFrame(iteration_stats)

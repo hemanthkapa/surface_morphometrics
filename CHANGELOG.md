@@ -4,6 +4,32 @@ All notable changes to the Surface Morphometrics toolkit are documented here.
 This project loosely follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [2.0.0b3] — beta
+
+A performance and robustness release for the mesh-refinement step, plus the move of
+the repository to the Barad Lab GitHub organization.
+
+### Changed
+- **Mesh refinement now runs pycurv only once, on the final surface.** Every
+  intermediate iteration (cross-correlation and dual-Gaussian) builds a fast
+  lightweight graph from VTK normals and warns that the surface is not
+  curvature-ready; a single full pycurv normal-vector-voting pass runs on the
+  accepted surface after the loop — on every exit path, including an early
+  convergence stop — so the result is always a clean, curvature-ready surface.
+  Previously every dual-Gaussian iteration re-ran the slow voting (~28 min on large
+  surfaces), which dominated refinement time.
+- Mesh-refinement parallel fitting (dual-Gaussian offset centering and local
+  thickness) now respects the configured `cores` instead of spawning one worker per
+  logical CPU. Benchmarking showed throughput peaks near the configured core count
+  and regresses beyond it, so this is both a correctness and a speed improvement.
+- `accept_refinement` messages now refer to "intermediate" iterations (any non-final
+  iteration may lack a curvature graph), not specifically cross-correlation ones.
+- Repository moved to `https://github.com/baradlab/surface_morphometrics`.
+
+### Fixed
+- `__version__` in `surface_morphometrics/__init__.py` had drifted a release behind
+  `pyproject.toml`; both version strings are now kept in sync.
+
 ## [2.0.0b2] — beta
 
 A quality and robustness release on top of 2.0.0b1, focused on the density-profile
@@ -97,5 +123,6 @@ how the toolkit is invoked.
 - README reorganized (Installation / Quick start / Pipeline / Analysis &
   visualization / Reference / Upgrading) with a table of contents.
 
+[2.0.0b3]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b2]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b1]: https://github.com/baradlab/surface_morphometrics/releases
