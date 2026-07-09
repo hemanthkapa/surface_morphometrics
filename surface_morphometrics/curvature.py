@@ -21,13 +21,16 @@ def _require_gpu_backend(device=None):
         import torch
     except ImportError as e:
         raise RuntimeError(
-            'GPU pycurv requires PyTorch. Install the GPU extra: pip install -e ".[gpu]"'
+            "GPU pycurv requires PyTorch. Install a CUDA torch build "
+            "(https://pytorch.org/get-started/locally/) into the morphometrics env."
         ) from e
     try:
         from core.api import run_pipeline  # noqa: F401
     except ImportError as e:
         raise RuntimeError(
-            'GPU pycurv requires pycurv-gpu. Install the GPU extra: pip install -e ".[gpu]"'
+            "GPU pycurv requires pycurv-gpu. Reinstall the morphometrics env "
+            "(environment.yml includes pycurv-gpu) or: "
+            "pip install git+https://github.com/hemanthkapa/pycurv-gpu.git"
         ) from e
     resolved = device
     if resolved is None:
