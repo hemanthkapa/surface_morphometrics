@@ -60,6 +60,7 @@ thickness_measurements:
 # PATCH ANALYSIS (used by generate_patches.py and label_connected_components.py)
 patch_analysis:
   membrane_label: IMM            # Which segmentation_values label to place patches on (batch mode)
+  measurement_prefix: ribo       # Prefix for the patch measurement columns (e.g. ribo_patch_number, ribo_random_patch_number). Patches are written IN PLACE into the membrane .gt/.vtp/.csv, so re-running with a different prefix (e.g. atp) adds a second patch type to the same surface without overwriting the first.
   patch_radius: 12               # nm; triangles within this distance of a center join the patch
   particle_max_distance: 24      # nm; skip patches when the particle is farther than this from the membrane. Set to null to disable.
   generate_random: true          # Also generate matched random control patches
@@ -68,6 +69,11 @@ patch_analysis:
   star_dir: "./star/"            # Directory of STAR files (batch mode)
   star_pattern: "{tomo}.star"    # How to find the STAR file for a tomogram basename
   star_tomo_column: null         # Only needed for combined multi-tomogram STAR files: the column holding the tomogram/micrograph name (e.g. rlnMicrographName or rlnTomoName). When set, only rows containing the tomogram name are used. Leave null if each STAR holds a single tomogram.
+  # NOTE: RELION 3/4 STAR files only. These use absolute tomogram-frame coordinates
+  # (rlnCoordinateX/Y/Z in pixels from voxel 0), which match the surface frame directly.
+  # RELION 5 tomography STAR files use rlnCenteredCoordinate*Angst (relative to the
+  # tomogram center) and are NOT currently supported — they would need the tomogram
+  # box size added as a half-extent offset. Convert them to absolute coordinates first.
   star_coord_columns: [rlnCoordinateX, rlnCoordinateY, rlnCoordinateZ]  # Particle coordinate columns
   star_pixelsize_column: rlnPixelSize  # Pixel size column (Angstrom/pixel)
   star_coords_in_pixels: true    # If true, multiply coordinates by the pixel-size column

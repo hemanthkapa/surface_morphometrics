@@ -24,6 +24,7 @@ subcompartments. J Cell Biol 2025.
 # must run before the pycurv/graph_tool imports below.
 import os
 os.environ["OMP_NUM_THREADS"] = "1"
+import gc
 
 import numpy as np
 import pandas as pd
@@ -51,7 +52,9 @@ from ._thickness_worker import (init_worker, fit_triangle_chunk_offsets,
                                _dual_gaussian_centered, _dual_gaussian_shared_width,
                                _seed_bilayer_center, _symmetric_fit_window,
                                MIN_THICKNESS, MAX_THICKNESS)
-from . import curvature
+# NOTE: curvature.run_pycurv is invoked in a subprocess (see run_pycurv_refinement),
+# not imported here, so pycurv runs in a clean process rather than inheriting this
+# one's memory state.
 
 
 def compute_local_thicknesses_parallel(value_array, xyz, x_positions, average_radius, n_workers=None):
@@ -625,8 +628,10 @@ def run_pycurv_refinement(vtp_file, output_base, pixel_size, radius_hit, cores=6
     """
     Run pycurv normal vector voting on a refined surface.
 
-    Uses the existing curvature.run_pycurv workflow for consistency
-    with the rest of the pipeline.
+    Invokes curvature.run_pycurv in a fresh subprocess (see the body) so it runs
+    with standalone-pycurv performance instead of inheriting the long-lived
+    refinement process's memory/allocator state, which was measured to slow NVV
+    3-4x per chunk.
 
     Parameters
     ----------
@@ -677,19 +682,48 @@ def run_pycurv_refinement(vtp_file, output_base, pixel_size, radius_hit, cores=6
         if os.path.exists(stale):
             os.remove(stale)
 
-    # Run pycurv using existing workflow (scale=1 since surface is already in nm)
-    curvature.run_pycurv(
-        f"{basename}.surface.vtp",
-        output_dir,
-        scale=1.0,
-        radius_hit=radius_hit,
-        min_component=0,  # Don't remove components during refinement
-        exclude_borders=0,
-        cores=cores
+    # Run pycurv in a FRESH SUBPROCESS rather than in-process.
+    #
+    # When run inline, pycurv forks its worker pool from the long-lived refinement
+    # process (large resident memory, warm machine, accumulated allocator state).
+    # That was measured ~3-4x slower per NVV chunk (~5.9 vs ~1.6 s/chunk) than the
+    # IDENTICAL surface processed by a standalone `morphometrics pycurv` run, and
+    # freeing memory / gc.collect() before the fork did not recover the speed. A
+    # clean child process gets a fresh address space and its own memory arenas,
+    # reproducing standalone-pycurv performance. We replicate the exact in-process
+    # call (scale=1 since the surface is already in nm; min_component=0 keeps all
+    # components during refinement) and stream the child's output to this process.
+    import subprocess
+    import sys
+    runner = (
+        "import os, sys\n"
+        "os.environ['OMP_NUM_THREADS'] = '1'\n"  # before importing graph-tool/pycurv
+        "from surface_morphometrics import curvature\n"
+        "surf, outdir, rh_s, cores = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])\n"
+        "try:\n"
+        "    rh = int(rh_s)\n"          # preserve int vs float so AVV_rh<N> filenames match
+        "except ValueError:\n"
+        "    rh = float(rh_s)\n"
+        "curvature.run_pycurv(surf, outdir, scale=1.0, radius_hit=rh,\n"
+        "                     min_component=0, exclude_borders=0, cores=cores)\n"
     )
+    proc = subprocess.run(
+        [sys.executable, "-c", runner,
+         f"{basename}.surface.vtp", output_dir, str(radius_hit), str(cores)],
+        env={**os.environ, "OMP_NUM_THREADS": "1"},
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"pycurv subprocess failed (exit {proc.returncode}) for "
+            f"{basename}.surface.vtp"
+        )
 
     graph_file = f"{output_base}.AVV_rh{radius_hit}.gt"
     surface_file = f"{output_base}.AVV_rh{radius_hit}.vtp"
+    if not os.path.exists(graph_file):
+        raise RuntimeError(
+            f"pycurv subprocess finished but did not produce {graph_file}"
+        )
 
     return graph_file, surface_file
 
@@ -783,6 +817,11 @@ def finalize_surface_with_pycurv(surface_vtp, mrc_file, output_base, pixel_size,
         ('local_thicknesses', 'mean_thickness', 'std_thickness').
     """
     print("\n=== Finalizing accepted surface with pycurv ===")
+    # pycurv runs in its own subprocess (see run_pycurv_refinement), so it no longer
+    # inherits this process's memory. Still collect here to shrink this process's
+    # resident footprint while the pycurv subprocess and its workers run, reducing
+    # overall system memory pressure on a machine loaded by the full refinement run.
+    gc.collect()
     print("Running full pycurv normal vector voting for a curvature-ready final surface...")
     graph_file, surface_file = run_pycurv_refinement(
         surface_vtp, output_base, pixel_size, radius_hit, cores)
@@ -811,6 +850,9 @@ def finalize_surface_with_pycurv(surface_vtp, mrc_file, output_base, pixel_size,
         result['local_thicknesses'] = valid
         result['mean_thickness'] = np.mean(valid) if len(valid) > 0 else np.nan
         result['std_thickness'] = np.std(valid) if len(valid) > 0 else np.nan
+        # Free the large density-sampling arrays / graph before returning.
+        del refined_value_array, refined_xyz, local_thicknesses, rtg
+        gc.collect()
 
     return result
 
@@ -1141,6 +1183,14 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
         'avg_profile_sigma2': avg_profile_sigma2,
         'avg_profile_thickness': avg_profile_thickness
     }
+
+    # Free the large per-iteration arrays, surfaces, and graphs before returning.
+    # None of these are kept in `stats`; releasing them each iteration keeps the
+    # process from accumulating memory across iterations and surfaces, which is what
+    # drives the swapping/slowdown when the final pycurv forks its worker pool.
+    del value_array, sampling_data, refined_value_array, refined_xyz
+    del surf, refined_surf, tg, refined_tg, all_profiles
+    gc.collect()
 
     return stats
 
@@ -1819,6 +1869,14 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
                 print(f"Saved profile evolution plot: {profile_plot_file}")
 
                 all_stats[basename] = iteration_stats
+
+                # Release per-surface state and reclaim memory before the next
+                # surface, so resident memory doesn't grow across surfaces
+                # (IMM, OMM, ...). This keeps the next surface's final pycurv fork
+                # from running under accumulated memory pressure.
+                plt.close('all')
+                del original_positions, original_surf, original_points
+                gc.collect()
 
     return all_stats
 

@@ -4,6 +4,46 @@ All notable changes to the Surface Morphometrics toolkit are documented here.
 This project loosely follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [2.0.0b4] — beta
+
+Protein-patch workflow overhaul and a mesh-refinement pycurv speed fix.
+
+### Added
+- Protein-to-membrane-edge distances in the patch workflow. When per-triangle
+  `thickness` is present, `generate_patches` writes a `<prefix>_headgroup_distance`
+  (distance to the true membrane edge = midplane distance − thickness/2, measured
+  at the patch's central triangle) per-particle into the annotated STAR, and
+  `patch_statistics` reports it per-patch. The effective thickness falls back from
+  the central triangle to the patch's distance-weighted mean, then to NaN.
+- `patch_statistics` now reports `min_protein_distance` (closest membrane-midplane
+  approach) per real patch, and keeps the measurement prefix in `region_type`
+  (e.g. `ribo_patch`, `ribo_random_patch`) so multiple patch types can be compared.
+- `patch_analysis.measurement_prefix` (default `ribo`): patch measurement columns
+  are prefixed, so re-running with a different prefix accumulates a second patch
+  type (e.g. `atp`) on the same surface.
+
+### Changed
+- **`generate_patches` edits the membrane `.gt`/`.vtp`/`.csv` in place** instead of
+  writing a separate `*_patches` file set; `patch_statistics` and `extract_patches`
+  default to the in-place `*.AVV_rh*` files. `--output-dir` now only affects the
+  annotated STAR.
+- Refinement runs pycurv (the final curvature pass) in a **fresh subprocess**. Run
+  in-process at the end of a long refinement, pycurv was ~3–4× slower per NVV chunk
+  (measured) due to the loaded process's memory/allocator state, not the mesh; a
+  clean subprocess restores standalone speed. Refinement also frees large arrays
+  and runs `gc.collect()` between iterations/surfaces.
+
+### Fixed
+- Patch headgroup distance could exceed the protein distance: it was computed per
+  triangle then min-reduced, so the two minima came from different triangles (and
+  NaN-thickness triangles dropped out). It is now computed at the central triangle,
+  guaranteeing `headgroup_distance ≤ min_protein_distance`.
+
+### Notes
+- `generate_patches` supports RELION 3/4 STAR files (absolute tomogram-frame
+  coordinates). RELION 5 centered coordinates (`rlnCenteredCoordinate*Angst`) are
+  not yet supported; convert to absolute coordinates first.
+
 ## [2.0.0b3] — beta
 
 A performance and robustness release for the mesh-refinement step, plus the move of
@@ -123,6 +163,7 @@ how the toolkit is invoked.
 - README reorganized (Installation / Quick start / Pipeline / Analysis &
   visualization / Reference / Upgrading) with a table of contents.
 
+[2.0.0b4]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b3]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b2]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b1]: https://github.com/baradlab/surface_morphometrics/releases

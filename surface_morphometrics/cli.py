@@ -88,7 +88,7 @@ _NEXT_HINTS = {
     "sample_density": "Next:  morphometrics measure_thickness config.yml",
     "measure_thickness": "Next:  assemble results with  morphometrics stats config.yml <name>,  or plot with  morphometrics histogram / hist2d",
     "stats": "Next:  plot features with  morphometrics histogram <file>.csv -n <feature>  or  morphometrics hist2d <file>.csv -n1 <a> -n2 <b>",
-    "generate_patches": "Next:  summarize per patch with  morphometrics patch_statistics config.yml  (or split files with  morphometrics extract_patches config.yml --by patch_number)",
+    "generate_patches": "Next:  summarize per patch with  morphometrics patch_statistics config.yml  (or split files with  morphometrics extract_patches config.yml --by <prefix>_patch_number)",
     "label_components": "Next:  summarize per component with  morphometrics patch_statistics config.yml --pattern '*_components.csv'",
     "patch_statistics": "Next:  plot the per-region table with  morphometrics histogram / hist2d, or analyze patch_statistics.csv in pandas",
 }

@@ -5,8 +5,8 @@ This generalizes GrotjahnLab/patch_analysis/extract_single_patch.py from
 "split by patch_number" into an arbitrary graph subsetter with two modes:
 
 1. Split by a label column (one output file per unique id):
-     extract_patches.py config.yml --graph TS1_IMM..._patches.gt --by patch_number
-   Produces `..._patch_number<id>.{gt,vtp,csv}` for each id > 0.
+     extract_patches.py config.yml --graph TS1_IMM.AVV_rh9.gt --by ribo_patch_number
+   Produces `..._ribo_patch_number<id>.{gt,vtp,csv}` for each id > 0.
 
 2. Filter by a numeric vertex property range (one output file):
      extract_patches.py config.yml --graph TS1_IMM.AVV_rh9.gt --property OMM_dist --max 30
@@ -126,15 +126,14 @@ def extract_by_property(graph_file, prop, vmin, vmax, output_dir):
 @click.option("--graph", "graph_file", type=click.Path(exists=True), default=None,
               help="Single .gt graph to process (overrides batch mode).")
 @click.option("--by", "label_col", default=None,
-              help="Split mode: label column to split on (e.g. patch_number, "
-                   "patch_random_number, component_number).")
+              help="Split mode: label column to split on (e.g. ribo_patch_number, "
+                   "ribo_random_patch_number, component_number).")
 @click.option("--property", "prop", default=None,
               help="Filter mode: vertex property to threshold (e.g. OMM_dist).")
 @click.option("--min", "vmin", type=float, default=None, help="Filter mode: minimum value.")
 @click.option("--max", "vmax", type=float, default=None, help="Filter mode: maximum value.")
 @click.option("--pattern", default=None,
-              help="Batch glob within work_dir (default: *_patches.gt for --by, "
-                   "*.AVV_rh{radius_hit}.gt for --property).")
+              help="Batch glob within work_dir (default: *.AVV_rh{radius_hit}.gt).")
 @click.option("--output-dir", "output_dir", default=None,
               help="Output directory (defaults to work_dir from config).")
 def extract_patches_cli(configfile, graph_file, label_col, prop, vmin, vmax,
@@ -169,7 +168,9 @@ def extract_patches_cli(configfile, graph_file, label_col, prop, vmin, vmax,
         return
 
     if pattern is None:
-        pattern = "*_patches.gt" if label_col is not None else f"*.AVV_rh{radius_hit}.gt"
+        # Patches are now stored in place on the membrane AVV graphs, so both modes
+        # default to the same enriched surfaces.
+        pattern = f"*.AVV_rh{radius_hit}.gt"
     graphs = sorted(glob(work_dir + pattern))
     # Avoid re-processing our own extractor outputs.
     graphs = [g for g in graphs if "_filtered" not in g]

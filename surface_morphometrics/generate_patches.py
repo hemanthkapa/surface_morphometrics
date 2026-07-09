@@ -13,6 +13,11 @@ This generalizes GrotjahnLab/patch_analysis/find_IMM_patches_for_ATP_synthase.py
 to any membrane and any particle set, driven by config.yml like the rest of the
 surface morphometrics pipeline.
 
+STAR compatibility: RELION 3/4 only. Their rlnCoordinateX/Y/Z are absolute
+tomogram-frame coordinates that match the surface frame. RELION 5 tomography STAR
+files (rlnCenteredCoordinate*Angst, relative to the tomogram center) are NOT yet
+supported and must be converted to absolute coordinates first.
+
 Two usage modes:
 1. Batch over all tomograms in work_dir for the configured membrane label:
      generate_patches.py config.yml
@@ -30,10 +35,21 @@ extensions, and pixel-size/bin suffixes (e.g. `TS_004` matches
 `/data/TS_004.mrc_6.65Apx.mrc`). `patch_id` still refers to the row number in the
 original STAR.
 
-Vertex properties added to the graph (0 means "not in any patch"):
-  patch_number, patch_center             - real patches (= STAR line ID)
-  patch_center_distance, protein_distance
-  patch_random_number, patch_random_center, patch_random_center_distance
+Outputs are written IN PLACE: the patch properties are added back into the input
+membrane .gt / .vtp / .csv (no separate *_patches file set). Measurement names are
+prefixed by `patch_analysis.measurement_prefix` (default "ribo"), so different
+patch types (ribosome, ATP synthase, ...) can be measured into the same surface
+without colliding — just re-run with a different prefix.
+
+Vertex properties added (0 means "not in any patch"; <p> = the configured prefix):
+  <p>_patch_number, <p>_patch_center             - real patches (= STAR line ID)
+  <p>_patch_center_distance, <p>_protein_distance
+  <p>_random_patch_number, <p>_random_patch_center, <p>_random_patch_center_distance
+
+When per-triangle `thickness` is present, a headgroup distance (distance to the true
+membrane edge = protein distance - thickness/2, measured at the patch's central
+triangle) is also written per-particle into the annotated STAR as
+<p>_headgroup_distance, and reported per-patch by `morphometrics patch_statistics`.
 """
 
 __author__ = "Benjamin Barad"
@@ -166,6 +182,46 @@ def choose_random_centers(triangle_xyz, n_centers, min_distance, rng,
     return chosen
 
 
+def effective_thickness(center_thickness, thicknesses, center_distances):
+    """Membrane thickness to use for a patch's headgroup distance.
+
+    Prefer the central triangle's own thickness. If that is unmeasured (NaN or
+    <= 0), fall back to the distance-from-center weighted mean of the patch's
+    measured thicknesses (closer triangles weighted more, weight = 1/(1+distance)).
+    If the patch has no measured thickness at all, return NaN.
+    """
+    if np.isfinite(center_thickness) and center_thickness > 0:
+        return float(center_thickness)
+    th = np.asarray(thicknesses, dtype=float)
+    cd = np.asarray(center_distances, dtype=float)
+    mask = np.isfinite(th) & (th > 0)
+    if not mask.any():
+        return float("nan")
+    w = 1.0 / (1.0 + cd[mask])
+    return float(np.sum(th[mask] * w) / np.sum(w))
+
+
+def _particle_headgroup_distances(triangle_xyz, thickness, min_d, min_i, patch_radius):
+    """Per-particle distance to the true membrane edge (headgroups).
+
+    For each particle: its mesh distance minus half the effective thickness at its
+    nearest (patch-center) triangle, using the triangles within `patch_radius` of
+    that center as the fallback for `effective_thickness`. NaN when the patch has no
+    measured thickness.
+    """
+    from scipy.spatial import cKDTree
+    tree = cKDTree(triangle_xyz)
+    out = np.full(len(min_i), np.nan)
+    for p in range(len(min_i)):
+        ci = int(min_i[p])
+        nbr = np.asarray(tree.query_ball_point(triangle_xyz[ci], patch_radius))
+        cd = np.linalg.norm(triangle_xyz[nbr] - triangle_xyz[ci], axis=1)
+        t_eff = effective_thickness(thickness[ci], thickness[nbr], cd)
+        if np.isfinite(t_eff):
+            out[p] = min_d[p] - t_eff / 2.0
+    return out
+
+
 # ---------------------------------------------------------------------------
 # STAR / config helpers
 # ---------------------------------------------------------------------------
@@ -205,6 +261,13 @@ def load_particle_coordinates(star_file, pa_config, angstroms, tomo_name=None):
     If `star_tomo_column` is set in the config and `tomo_name` is given, only rows
     whose value in that column contains `tomo_name` are kept (for combined STAR
     files spanning many tomograms).
+
+    NOTE: RELION 3/4 STAR files only. Those store absolute tomogram-frame
+    coordinates (rlnCoordinateX/Y/Z in pixels from voxel 0), which line up with the
+    surface frame directly. RELION 5 tomography STAR files use
+    rlnCenteredCoordinate*Angst (relative to the tomogram center) and are NOT
+    currently supported: they would need the tomogram box size added as a
+    half-extent offset. Convert them to absolute coordinates before use.
     """
     import starfile
     star = starfile.read(star_file)
@@ -274,6 +337,10 @@ def generate_patches_single(graph_file, star_file, pa_config, radius_hit,
     particle_max_distance = pa_config.get("particle_max_distance", None)
     random_min_distance = pa_config.get("random_min_distance", patch_radius)
     annotate_star = pa_config.get("annotate_star", True)
+    # Measurement names are prefixed (default "ribo") so several kinds of patches
+    # (e.g. ribosome vs ATP synthase) can be measured into the SAME surface without
+    # colliding — each run adds its own <prefix>_* properties in place.
+    prefix = pa_config.get("measurement_prefix", "ribo")
 
     print(f"Processing graph: {graph_file}")
     print(f"  STAR file: {star_file}")
@@ -282,6 +349,15 @@ def generate_patches_single(graph_file, star_file, pa_config, radius_hit,
     triangle_xyz = tg.graph.vp.xyz.get_2d_array([0, 1, 2]).transpose()
     n_triangles = triangle_xyz.shape[0]
     print(f"  {n_triangles} triangles")
+
+    # If per-triangle membrane thickness is present (from measure_thickness), also
+    # emit <prefix>_headgroup_distance = (protein/mesh distance) - thickness/2: the
+    # distance to the true membrane edge (lipid headgroups) rather than the bilayer
+    # midplane that the surface sits on.
+    have_thickness = "thickness" in tg.graph.vp
+    thickness = tg.graph.vp["thickness"].get_array() if have_thickness else None
+    if have_thickness:
+        print(f"  Thickness present -> adding {prefix}_headgroup_distance")
 
     star, particle_xyz, line_ids = load_particle_coordinates(
         star_file, pa_config, angstroms, tomo_name=tomo_name)
@@ -303,6 +379,12 @@ def generate_patches_single(graph_file, star_file, pa_config, radius_hit,
         star["patch_id"] = line_ids
         star["mesh_distance"] = min_d
         star["mesh_neighbor_id"] = min_i
+        if have_thickness:
+            # Distance from each particle to the true membrane edge (headgroups),
+            # measured at its nearest (patch-center) triangle; see
+            # effective_thickness for the center->patch-mean->NaN thickness fallback.
+            star[f"{prefix}_headgroup_distance"] = _particle_headgroup_distances(
+                triangle_xyz, thickness, min_d, min_i, patch_radius)
         star_stem = os.path.splitext(os.path.basename(star_file))[0]
         annotated_path = os.path.join(output_dir, f"{star_stem}_{label}_meshannotated.star")
         _write_star(star, annotated_path)
@@ -325,10 +407,15 @@ def generate_patches_single(graph_file, star_file, pa_config, radius_hit,
 
     real = assign_patches(triangle_xyz, center_indices, center_ids, patch_radius,
                           particle_xyz=center_particle_xyz)
-    _set_int_vp(tg, "patch_number", real["number"])
-    _set_int_vp(tg, "patch_center", real["center"])
-    _set_float_vp(tg, "patch_center_distance", real["center_distance"])
-    _set_float_vp(tg, "protein_distance", real["protein_distance"])
+    _set_int_vp(tg, f"{prefix}_patch_number", real["number"])
+    _set_int_vp(tg, f"{prefix}_patch_center", real["center"])
+    _set_float_vp(tg, f"{prefix}_patch_center_distance", real["center_distance"])
+    _set_float_vp(tg, f"{prefix}_protein_distance", real["protein_distance"])
+    # Note: the headgroup distance is a per-patch quantity measured at the central
+    # triangle (protein distance - effective_thickness/2), not a per-triangle field.
+    # It is emitted per-particle in the annotated STAR (above) and per-patch by
+    # `morphometrics patch_statistics` (from protein_distance + thickness), so it is
+    # not stored as a per-triangle vertex property here.
 
     if generate_random:
         rng = np.random.default_rng(seed)
@@ -341,19 +428,21 @@ def generate_patches_single(graph_file, star_file, pa_config, radius_hit,
         # Random patches reuse the paired real patch ids so number i <-> random i.
         rand_ids = center_ids[:len(rand_centers)]
         rand = assign_patches(triangle_xyz, rand_centers, rand_ids, patch_radius)
-        _set_int_vp(tg, "patch_random_number", rand["number"])
-        _set_int_vp(tg, "patch_random_center", rand["center"])
-        _set_float_vp(tg, "patch_random_center_distance", rand["center_distance"])
+        _set_int_vp(tg, f"{prefix}_random_patch_number", rand["number"])
+        _set_int_vp(tg, f"{prefix}_random_patch_center", rand["center"])
+        _set_float_vp(tg, f"{prefix}_random_patch_center_distance", rand["center_distance"])
 
-    # Save outputs next to the input graph (or in output_dir).
-    base = os.path.splitext(os.path.basename(graph_file))[0]
-    out_base = os.path.join(output_dir, f"{base}_patches")
-    tg.graph.save(f"{out_base}.gt")
+    # Edit the input graph/surface/CSV IN PLACE: write the patch properties back
+    # into the existing AVV files rather than creating a separate *_patches set.
+    # This keeps a single enriched surface per membrane and lets repeated runs with
+    # different prefixes accumulate multiple patch types on it.
+    base_path = os.path.splitext(graph_file)[0]
+    tg.graph.save(f"{base_path}.gt")
     surf = tg.graph_to_triangle_poly()
-    io.save_vtp(surf, f"{out_base}.vtp")
+    io.save_vtp(surf, f"{base_path}.vtp")
     from .intradistance_verticality import export_csv
-    export_csv(tg, f"{out_base}.csv")
-    print(f"  Saved: {out_base}.gt / .vtp / .csv")
+    export_csv(tg, f"{base_path}.csv")
+    print(f"  Updated in place ({prefix}_patch*): {base_path}.gt / .vtp / .csv")
 
 
 def _write_star(df, path):
@@ -388,7 +477,8 @@ def _set_float_vp(tg, name, array):
 @click.option("--label", default=None,
               help="Membrane label (e.g. IMM). Defaults to patch_analysis.membrane_label.")
 @click.option("--output-dir", "output_dir", default=None,
-              help="Output directory (defaults to work_dir from config).")
+              help="Directory for the annotated STAR (defaults to work_dir). The "
+                   "membrane .gt/.vtp/.csv are edited in place, not written here.")
 @click.option("--no-random", is_flag=True, default=False,
               help="Skip generation of random control patches.")
 @click.option("--seed", type=int, default=None,
@@ -432,7 +522,9 @@ def generate_patches_cli(configfile, graph_file, star_file, label, output_dir,
 
     print("Patch generation settings:")
     print(f"  Work directory: {work_dir}")
-    print(f"  Output directory: {output_dir}")
+    print(f"  Output directory (annotated STAR): {output_dir}")
+    print(f"  Membrane .gt/.vtp/.csv: edited in place")
+    print(f"  Measurement prefix: {pa_config.get('measurement_prefix', 'ribo')}")
     print(f"  Membrane label: {label}")
     print(f"  Patch radius: {pa_config.get('patch_radius', 12)} nm")
     mdist = pa_config.get("particle_max_distance", None)
