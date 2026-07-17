@@ -19,6 +19,43 @@ from surface_morphometrics import curvature  # noqa: E402
 from surface_morphometrics import run_pycurv as run_pycurv_mod  # noqa: E402
 
 
+def test_require_gpu_backend_fails_without_accelerator():
+    fake_torch = MagicMock()
+    fake_torch.cuda.is_available.return_value = False
+    fake_api = ModuleType("core.api")
+    fake_api.run_pipeline = MagicMock()
+    fake_core = ModuleType("core")
+    with patch.dict(sys.modules, {
+             "torch": fake_torch,
+             "core": fake_core,
+             "core.api": fake_api,
+         }):
+        try:
+            curvature._require_gpu_backend(None)
+            assert False, "expected RuntimeError"
+        except RuntimeError as exc:
+            assert "CUDA is not available" in str(exc)
+            assert "will not fall back to CPU torch" in str(exc)
+
+
+def test_require_gpu_backend_rejects_explicit_cpu():
+    fake_torch = MagicMock()
+    fake_torch.cuda.is_available.return_value = True
+    fake_api = ModuleType("core.api")
+    fake_api.run_pipeline = MagicMock()
+    fake_core = ModuleType("core")
+    with patch.dict(sys.modules, {
+             "torch": fake_torch,
+             "core": fake_core,
+             "core.api": fake_api,
+         }):
+        try:
+            curvature._require_gpu_backend("cpu")
+            assert False, "expected RuntimeError"
+        except RuntimeError as exc:
+            assert "gpu_device='cpu' is not supported" in str(exc)
+
+
 def test_run_pycurv_dispatches_to_gpu():
     with patch.object(curvature, "run_pycurv_gpu") as mock_gpu:
         curvature.run_pycurv(

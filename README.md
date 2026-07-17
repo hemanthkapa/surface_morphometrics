@@ -123,7 +123,7 @@ Enable it either way:
 ```yaml
 # in config.yml under curvature_measurements
 use_gpu: true
-# gpu_device: null        # optional: cuda / cpu / mps (null = auto)
+# gpu_device: null        # optional: cuda (null = auto; never falls back to CPU)
 # gpu_batch_size: 1024    # optional tuning
 ```
 ```bash

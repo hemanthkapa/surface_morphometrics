@@ -16,7 +16,7 @@ from .curvature_calculation import new_workflow, extract_curvatures_after_new_wo
 
 
 def _require_gpu_backend(device=None):
-    """Fail fast if pycurv-gpu / torch are missing or CUDA was requested but unavailable."""
+    """Fail fast if pycurv-gpu / torch / a CUDA device are unavailable."""
     try:
         import torch
     except ImportError as e:
@@ -32,16 +32,35 @@ def _require_gpu_backend(device=None):
             "(environment.yml includes pycurv-gpu) or: "
             "pip install git+https://github.com/hemanthkapa/pycurv-gpu.git"
         ) from e
-    resolved = device
-    if resolved is None:
-        if torch.cuda.is_available():
-            resolved = 'cuda'
-        elif getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():
-            resolved = 'mps'
-        else:
-            resolved = 'cpu'
-    if resolved == 'cuda' and not torch.cuda.is_available():
-        raise RuntimeError('use_gpu was requested but CUDA is not available.')
+
+    cuda_ok = torch.cuda.is_available()
+
+    if device is None:
+        if cuda_ok:
+            return 'cuda'
+        raise RuntimeError(
+            "use_gpu was requested but CUDA is not available. "
+            "Install a CUDA PyTorch build on a GPU machine, or set use_gpu: false "
+            "to use CPU pycurv. GPU mode will not fall back to CPU torch."
+        )
+
+    resolved = str(device).lower()
+    if resolved in ('cpu', 'cpu:0'):
+        raise RuntimeError(
+            "gpu_device='cpu' is not supported. use_gpu requires CUDA; "
+            "set use_gpu: false to run CPU pycurv instead."
+        )
+    if resolved == 'mps':
+        raise RuntimeError(
+            "gpu_device='mps' is not supported. use_gpu requires CUDA; "
+            "set use_gpu: false to run CPU pycurv instead."
+        )
+    if resolved.startswith('cuda') and not cuda_ok:
+        raise RuntimeError(
+            "use_gpu was requested with gpu_device={!r} but CUDA is not available. "
+            "Install a CUDA PyTorch build, or set use_gpu: false for CPU pycurv."
+            .format(device)
+        )
     return resolved
 
 
